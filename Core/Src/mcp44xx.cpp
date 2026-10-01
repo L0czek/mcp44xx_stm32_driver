@@ -35,13 +35,12 @@ uint16_t DigitalPotentiometer::max_wiper_code() const {
 }
 
 uint8_t DigitalPotentiometer::volatile_wiper_reg(Wiper wiper) const {
-    static constexpr uint8_t map[] = {
-        [static_cast<uint8_t>(Wiper::W0)] = REG_W0_V,
-        [static_cast<uint8_t>(Wiper::W1)] = REG_W1_V,
-        [static_cast<uint8_t>(Wiper::W2)] = REG_W2_V,
-        [static_cast<uint8_t>(Wiper::W3)] = REG_W3_V
-    };
-    return map[static_cast<uint8_t>(wiper)];
+    switch (wiper) {
+        case mcp44xx::Wiper::W0: return REG_W0_V; break;
+        case mcp44xx::Wiper::W1: return REG_W1_V; break;
+        case mcp44xx::Wiper::W2: return REG_W2_V; break;
+        case mcp44xx::Wiper::W3: return REG_W3_V; break;
+    }
 }
 
 uint8_t DigitalPotentiometer::nonvolatile_wiper_reg(Wiper wiper) const {
