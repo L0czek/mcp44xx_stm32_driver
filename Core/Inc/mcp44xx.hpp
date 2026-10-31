@@ -67,7 +67,10 @@ enum class ErrorCode : uint8_t {
     InvalidParameter,
     InvalidWiper,
     InvalidSlot,
-    EEPROMBusy
+    EEPROMBusy,
+    // I2C failure classes (single-master bus, so ARLO also means a bus fault):
+    Nack,             // device did not acknowledge (absent, busy, or rejected the command)
+    BusError
 };
 
 /**
@@ -90,6 +93,8 @@ public:
             case ErrorCode::InvalidWiper: return "Invalid wiper number";
             case ErrorCode::InvalidSlot: return "Invalid EEPROM slot";
             case ErrorCode::EEPROMBusy: return "EEPROM write in progress";
+            case ErrorCode::Nack: return "I2C NACK (not responding, locked wiper, or invalid command)";
+            case ErrorCode::BusError: return "I2C bus error";
             default: return "Unknown error";
         }
     }

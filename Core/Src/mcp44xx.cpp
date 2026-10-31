@@ -15,22 +15,20 @@ DigitalPotentiometer::DigitalPotentiometer(I2C_HandleTypeDef* hi2c,
 DigitalPotentiometer::~DigitalPotentiometer() = default;
 
 std::error_code DigitalPotentiometer::convert_hal_status(HAL_StatusTypeDef status) const {
+    // Only called for failed transfers. The device NACKs writes to a locked
+    // wiper / write-protected NV memory, invalid address+command combinations
+    // and NV access during an EEPROM cycle (datasheet 7.3, Table 7-3).
+    const uint32_t err = hi2c_ ? HAL_I2C_GetError(hi2c_) : 0u;
+    if (err & HAL_I2C_ERROR_AF) {
+        return make_error_code(ErrorCode::Nack);
+    }
+    if (err & (HAL_I2C_ERROR_BERR | HAL_I2C_ERROR_ARLO)) {
+        return make_error_code(ErrorCode::BusError);
+    }
     switch (status) {
-        case HAL_OK:
-            return make_error_code(ErrorCode::None);
-        case HAL_TIMEOUT:
-            return make_error_code(ErrorCode::Timeout);
-        case HAL_BUSY:
-            return make_error_code(ErrorCode::I2CError);
-        case HAL_ERROR:
-        default:
-            // The device NACKs writes to a locked wiper / write-protected NV memory,
-            // invalid address+command combinations and NV access during an EEPROM
-            // cycle (datasheet 7.3, Table 7-3). Report that apart from bus faults.
-            if (hi2c_ && (HAL_I2C_GetError(hi2c_) & HAL_I2C_ERROR_AF) != 0) {
-                return make_error_code(ErrorCode::I2CError);
-            }
-            return make_error_code(ErrorCode::HALError);
+        case HAL_TIMEOUT: return make_error_code(ErrorCode::Timeout);
+        case HAL_BUSY:    return make_error_code(ErrorCode::BusError);  // BUSY flag stuck: SDA/SCL held low
+        default:          return make_error_code(ErrorCode::HALError);
     }
 }
 
