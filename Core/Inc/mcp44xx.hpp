@@ -14,11 +14,9 @@
 #include <array>
 #include <string>
 #include <cstring>
-#include <stdexcept>
 #include <system_error>
 
-// Include custom expected for C++17 compatibility
-// This is namespace-specific to avoid duplicate definitions
+// std::expected alias (driver is built as C++23)
 #include "mcp44xx_expected.hpp"
 
 // STM32 HAL includes - use stub for testing
@@ -152,7 +150,7 @@ public:
      */
     DigitalPotentiometer(I2C_HandleTypeDef* hi2c,
                         uint8_t address7,
-                        Resolution resolution = Resolution::Bits8,
+                        Resolution resolution,
                         uint32_t timeout_ms = 100);
 
     /**
@@ -171,6 +169,11 @@ public:
      * @return Maximum wiper code (0x80 for 7-bit, 0x100 for 8-bit)
      */
     uint16_t max_wiper_code() const;
+
+    /**
+     * @brief Mid-scale wiper code: 0x40 on 7-bit (MCP444x), 0x80 on 8-bit (MCP446x)
+     */
+    uint16_t mid_scale_code() const { return static_cast<uint16_t>(max_wiper_code() / 2); }
 
     /**
      * @brief Set wiper value (volatile)
@@ -363,7 +366,7 @@ private:
     /**
      * @brief Convert HAL status to expected error code
      */
-    static std::error_code convert_hal_status(HAL_StatusTypeDef status);
+    std::error_code convert_hal_status(HAL_StatusTypeDef status) const;
 
     /**
      * @brief Validate wiper number

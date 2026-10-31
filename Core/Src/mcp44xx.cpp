@@ -10,18 +10,26 @@ DigitalPotentiometer::DigitalPotentiometer(I2C_HandleTypeDef* hi2c,
       address7_(address7 & 0x7Fu),
       resolution_(resolution),
       timeout_ms_(timeout_ms),
-      initialized_(true) {}
+      initialized_(false) {}
 
 DigitalPotentiometer::~DigitalPotentiometer() = default;
 
-std::error_code DigitalPotentiometer::convert_hal_status(HAL_StatusTypeDef status) {
+std::error_code DigitalPotentiometer::convert_hal_status(HAL_StatusTypeDef status) const {
     switch (status) {
         case HAL_OK:
             return make_error_code(ErrorCode::None);
         case HAL_TIMEOUT:
             return make_error_code(ErrorCode::Timeout);
+        case HAL_BUSY:
+            return make_error_code(ErrorCode::I2CError);
         case HAL_ERROR:
         default:
+            // The device NACKs writes to a locked wiper / write-protected NV memory,
+            // invalid address+command combinations and NV access during an EEPROM
+            // cycle (datasheet 7.3, Table 7-3). Report that apart from bus faults.
+            if (hi2c_ && (HAL_I2C_GetError(hi2c_) & HAL_I2C_ERROR_AF) != 0) {
+                return make_error_code(ErrorCode::I2CError);
+            }
             return make_error_code(ErrorCode::HALError);
     }
 }
@@ -36,11 +44,12 @@ uint16_t DigitalPotentiometer::max_wiper_code() const {
 
 uint8_t DigitalPotentiometer::volatile_wiper_reg(Wiper wiper) const {
     switch (wiper) {
-        case mcp44xx::Wiper::W0: return REG_W0_V; break;
-        case mcp44xx::Wiper::W1: return REG_W1_V; break;
-        case mcp44xx::Wiper::W2: return REG_W2_V; break;
-        case mcp44xx::Wiper::W3: return REG_W3_V; break;
+        case Wiper::W0: return REG_W0_V;
+        case Wiper::W1: return REG_W1_V;
+        case Wiper::W2: return REG_W2_V;
+        case Wiper::W3: return REG_W3_V;
     }
+    return 0xFF;  // unreachable: callers check valid_wiper()
 }
 
 uint8_t DigitalPotentiometer::nonvolatile_wiper_reg(Wiper wiper) const {
@@ -61,8 +70,9 @@ mcp44xx::expected<void> DigitalPotentiometer::probe() {
         timeout_ms_
     );
     if (status != HAL_OK) {
-        return convert_hal_status(status);
+        return std::unexpected(convert_hal_status(status));
     }
+    initialized_ = true;
     return {};
 }
 
@@ -83,7 +93,7 @@ mcp44xx::expected<void> DigitalPotentiometer::write_register(uint8_t reg, uint16
     );
 
     if (status != HAL_OK) {
-        return convert_hal_status(status);
+        return std::unexpected(convert_hal_status(status));
     }
     return {};
 }
@@ -103,7 +113,7 @@ mcp44xx::expected<void> DigitalPotentiometer::read_register(uint8_t reg, uint16_
     );
 
     if (status != HAL_OK) {
-        return convert_hal_status(status);
+        return std::unexpected(convert_hal_status(status));
     }
 
     // Read format is: [0..0 D8] [D7..D0].
@@ -123,17 +133,17 @@ mcp44xx::expected<void> DigitalPotentiometer::command_only(uint8_t reg, uint8_t 
     );
 
     if (status != HAL_OK) {
-        return convert_hal_status(status);
+        return std::unexpected(convert_hal_status(status));
     }
     return {};
 }
 
 mcp44xx::expected<void> DigitalPotentiometer::set_wiper(Wiper wiper, uint16_t code) {
     if (!valid_wiper(wiper)) {
-        return make_error_code(ErrorCode::InvalidWiper);
+        return std::unexpected(make_error_code(ErrorCode::InvalidWiper));
     }
     if (code > max_wiper_code()) {
-        return make_error_code(ErrorCode::InvalidParameter);
+        return std::unexpected(make_error_code(ErrorCode::InvalidParameter));
     }
 
     return write_register(volatile_wiper_reg(wiper), code);
@@ -141,7 +151,7 @@ mcp44xx::expected<void> DigitalPotentiometer::set_wiper(Wiper wiper, uint16_t co
 
 mcp44xx::expected<void> DigitalPotentiometer::get_wiper(Wiper wiper, uint16_t& code) {
     if (!valid_wiper(wiper)) {
-        return make_error_code(ErrorCode::InvalidWiper);
+        return std::unexpected(make_error_code(ErrorCode::InvalidWiper));
     }
 
     return read_register(volatile_wiper_reg(wiper), code);
@@ -149,20 +159,20 @@ mcp44xx::expected<void> DigitalPotentiometer::get_wiper(Wiper wiper, uint16_t& c
 
 mcp44xx::expected<void> DigitalPotentiometer::set_nonvolatile_wiper(Wiper wiper, uint16_t code) {
     if (!valid_wiper(wiper)) {
-        return make_error_code(ErrorCode::InvalidWiper);
+        return std::unexpected(make_error_code(ErrorCode::InvalidWiper));
     }
     if (code > max_wiper_code()) {
-        return make_error_code(ErrorCode::InvalidParameter);
+        return std::unexpected(make_error_code(ErrorCode::InvalidParameter));
     }
 
     const auto ready = wait_eeprom_ready();
     if (!ready.has_value()) {
-        return ready.error();
+        return std::unexpected(ready.error());
     }
 
     const auto status = write_register(nonvolatile_wiper_reg(wiper), code);
     if (!status.has_value()) {
-        return status.error();
+        return std::unexpected(status.error());
     }
 
     return wait_eeprom_ready();
@@ -170,15 +180,20 @@ mcp44xx::expected<void> DigitalPotentiometer::set_nonvolatile_wiper(Wiper wiper,
 
 mcp44xx::expected<void> DigitalPotentiometer::get_nonvolatile_wiper(Wiper wiper, uint16_t& code) {
     if (!valid_wiper(wiper)) {
-        return make_error_code(ErrorCode::InvalidWiper);
+        return std::unexpected(make_error_code(ErrorCode::InvalidWiper));
     }
 
+    // Reading NV memory during an EEPROM write cycle is an invalid command that
+    // latches an error until HVC is toggled (Table 4-1 note 1).
+    if (auto ready = wait_eeprom_ready(); !ready.has_value()) {
+        return ready;
+    }
     return read_register(nonvolatile_wiper_reg(wiper), code);
 }
 
 mcp44xx::expected<void> DigitalPotentiometer::increment_wiper(Wiper wiper) {
     if (!valid_wiper(wiper)) {
-        return make_error_code(ErrorCode::InvalidWiper);
+        return std::unexpected(make_error_code(ErrorCode::InvalidWiper));
     }
 
     return command_only(volatile_wiper_reg(wiper), CMD_INC);
@@ -186,7 +201,7 @@ mcp44xx::expected<void> DigitalPotentiometer::increment_wiper(Wiper wiper) {
 
 mcp44xx::expected<void> DigitalPotentiometer::decrement_wiper(Wiper wiper) {
     if (!valid_wiper(wiper)) {
-        return make_error_code(ErrorCode::InvalidWiper);
+        return std::unexpected(make_error_code(ErrorCode::InvalidWiper));
     }
 
     return command_only(volatile_wiper_reg(wiper), CMD_DEC);
@@ -200,7 +215,7 @@ mcp44xx::expected<void> DigitalPotentiometer::read_status(Status& status) {
     uint16_t value = 0;
     const auto result = read_status_raw(value);
     if (!result.has_value()) {
-        return result.error();
+        return std::unexpected(result.error());
     }
 
     status.wl0 = (value & STATUS_WL0) != 0;
@@ -219,7 +234,7 @@ mcp44xx::expected<void> DigitalPotentiometer::wait_eeprom_ready(uint32_t timeout
         uint16_t status = 0;
         const auto result = read_status_raw(status);
         if (!result.has_value()) {
-            return result.error();
+            return std::unexpected(result.error());
         }
 
         if ((status & STATUS_EEWA) == 0) {
@@ -227,7 +242,7 @@ mcp44xx::expected<void> DigitalPotentiometer::wait_eeprom_ready(uint32_t timeout
         }
 
         if ((HAL_GetTick() - start) >= timeout_ms) {
-            return make_error_code(ErrorCode::Timeout);
+            return std::unexpected(make_error_code(ErrorCode::EEPROMBusy));
         }
 
         HAL_Delay(1);
@@ -236,7 +251,7 @@ mcp44xx::expected<void> DigitalPotentiometer::wait_eeprom_ready(uint32_t timeout
 
 mcp44xx::expected<void> DigitalPotentiometer::write_tcon0(uint16_t value) {
     if (value > 0x1FFu) {
-        return make_error_code(ErrorCode::InvalidParameter);
+        return std::unexpected(make_error_code(ErrorCode::InvalidParameter));
     }
     return write_register(REG_TCON0, value);
 }
@@ -247,7 +262,7 @@ mcp44xx::expected<void> DigitalPotentiometer::read_tcon0(uint16_t& value) {
 
 mcp44xx::expected<void> DigitalPotentiometer::write_tcon1(uint16_t value) {
     if (value > 0x1FFu) {
-        return make_error_code(ErrorCode::InvalidParameter);
+        return std::unexpected(make_error_code(ErrorCode::InvalidParameter));
     }
     return write_register(REG_TCON1, value);
 }
@@ -258,20 +273,20 @@ mcp44xx::expected<void> DigitalPotentiometer::read_tcon1(uint16_t& value) {
 
 mcp44xx::expected<void> DigitalPotentiometer::write_eeprom(uint8_t slot, uint16_t value) {
     if (slot >= 5) {
-        return make_error_code(ErrorCode::InvalidSlot);
+        return std::unexpected(make_error_code(ErrorCode::InvalidSlot));
     }
     if (value > 0x1FFu) {
-        return make_error_code(ErrorCode::InvalidParameter);
+        return std::unexpected(make_error_code(ErrorCode::InvalidParameter));
     }
 
     const auto ready = wait_eeprom_ready();
     if (!ready.has_value()) {
-        return ready.error();
+        return std::unexpected(ready.error());
     }
 
     const auto status = write_register(static_cast<uint8_t>(REG_EE0 + slot), value);
     if (!status.has_value()) {
-        return status.error();
+        return std::unexpected(status.error());
     }
 
     return wait_eeprom_ready();
@@ -279,7 +294,10 @@ mcp44xx::expected<void> DigitalPotentiometer::write_eeprom(uint8_t slot, uint16_
 
 mcp44xx::expected<void> DigitalPotentiometer::read_eeprom(uint8_t slot, uint16_t& value) {
     if (slot >= 5) {
-        return make_error_code(ErrorCode::InvalidSlot);
+        return std::unexpected(make_error_code(ErrorCode::InvalidSlot));
+    }
+    if (auto ready = wait_eeprom_ready(); !ready.has_value()) {
+        return ready;
     }
     return read_register(static_cast<uint8_t>(REG_EE0 + slot), value);
 }

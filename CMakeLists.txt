@@ -157,15 +157,15 @@ target_link_libraries(${PROJECT_NAME}
 
 set_target_properties(${PROJECT_NAME}
     PROPERTIES
-        CXX_STANDARD 17
+        CXX_STANDARD 23
         CXX_STANDARD_REQUIRED ON
         CXX_EXTENSIONS OFF
 )
 
-# Exception handling required for expected type
+# Firmware is built without exceptions; std::expected (C++23) does not need them
 target_compile_options(${PROJECT_NAME}
     PRIVATE
-        -fexceptions
+        -fno-exceptions
 )
 
 # =============================================================================
@@ -241,7 +241,7 @@ if(MCP44XX_BUILD_UNIT_TESTS)
     # Create custom target that runs g++ directly
     add_custom_command(
         OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/test_mcp44xx.elf
-        COMMAND /usr/bin/g++ -std=c++17 -fexceptions
+        COMMAND /usr/bin/g++ -std=c++23
             -I${CMAKE_CURRENT_SOURCE_DIR}
             -I${CMAKE_CURRENT_SOURCE_DIR}/Core/Inc
             -I${CMAKE_CURRENT_SOURCE_DIR}/tests
